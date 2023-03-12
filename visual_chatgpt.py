@@ -38,6 +38,8 @@ VISUAL_CHATGPT_PREFIX = """Visual ChatGPT is designed to be able to assist with 
 
 Visual ChatGPT is able to process and understand large amounts of text and images. As a language model, Visual ChatGPT can not directly read images, but it has a list of tools to finish different visual tasks. Each image will have a file name formed as "image/xxx.png", and Visual ChatGPT can invoke different tools to indirectly understand pictures. When talking about images, Visual ChatGPT is very strict to the file name and will never fabricate nonexistent files. When using tools to generate new image files, Visual ChatGPT is also known that the image may not be the same as the user's demand, and will use other visual question answering tools or description tools to observe the real image. Visual ChatGPT is able to use tools in a sequence, and is loyal to the tool observation outputs rather than faking the image content and image file name. It will remember to provide the file name from the last tool observation, if a new image is generated.
 
+Visual ChatGPT is translating human input to a form that a tool can understand. For example, if a user wants to use a tool to generate a new image, Visual ChatGPT will translate the user's input to a vivid description, and then use the description to invoke the tool. 
+
 Human may provide new figures to Visual ChatGPT with a description. The description helps Visual ChatGPT to understand this image, but Visual ChatGPT should use tools to finish following tasks, rather than directly imagine from the description.
 
 Overall, Visual ChatGPT is a powerful visual dialogue assistant tool that can help with a wide range of tasks and provide valuable insights and information on a wide range of topics. 
@@ -54,20 +56,22 @@ VISUAL_CHATGPT_FORMAT_INSTRUCTIONS = """To use a tool, please use the following 
 Thought: Do I need to use a tool? Yes
 Action: the action to take, should be one of [{tool_names}]
 Action Input: the input to the action translated to English (if applicable)
-Observation: the result of the action
+Observation: the result of the action (Human will read this)
 ```
 
 When you have a response to say to the Human, or if you do not need to use a tool, you MUST use the format:
 
 ```
 Thought: Do I need to use a tool? No
-{ai_prefix}: [your response here]
+{ai_prefix}: [your response here] (Human will read this)
 ```
 Please try to match human language as much as possible.
 """
 
 VISUAL_CHATGPT_SUFFIX = """You are very strict to the filename correctness and will never fake a file name if it does not exist.
 You will remember to provide the image file name loyally if it's provided in the last tool observation.
+You will remember to communicate with the tools in English only.
+You will remember to communicate with Human in their language of choice.
 
 Begin!
 
@@ -135,6 +139,7 @@ class MaskFormer:
         mask = torch.sigmoid(outputs[0]).squeeze().cpu().numpy() > threshold
         area_ratio = len(np.argwhere(mask)) / (mask.shape[0] * mask.shape[1])
         if area_ratio < min_area:
+            print(f"Area ratio {area_ratio} is too small, skipping")
             return None
         true_indices = np.argwhere(mask)
         mask_array = np.zeros_like(mask, dtype=bool)
@@ -143,6 +148,7 @@ class MaskFormer:
             mask_array[padded_slice] = True
         visual_mask = (mask_array * 255).astype(np.uint8)
         image_mask = Image.fromarray(visual_mask)
+        print(f"Mask size: {image_mask.size}")
         return image_mask.resize(image.size)
 
 class ImageEditing:
@@ -172,12 +178,11 @@ class Pix2Pix:
         print("Initializing Pix2Pix to %s" % device)
         self.device = device
 
-
     def inference(self, inputs):
         """Change style of image."""
         print("===>Starting Pix2Pix Inference")
         pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained("timbrooks/instruct-pix2pix", torch_dtype=torch.float16, safety_checker=None).to(self.device)
-        pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(self.pipe.scheduler.config)
+        pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
         image_path, instruct_text = inputs.split(",")[0], ','.join(inputs.split(',')[1:])
         original_image = Image.open(image_path)
         image = pipe(instruct_text,image=original_image,num_inference_steps=40,image_guidance_scale=1.2,).images[0]
@@ -265,7 +270,7 @@ class canny2image:
         prompt = instruct_text
         img = resize_image(HWC3(image), self.image_resolution)
         H, W, C = img.shape
-        control = torch.from_numpy(img.copy()).float().to(device=self.device) / 255.0
+        control = torch.from_numpy(img.copy()).float().to(self.device) / 255.0
         control = torch.stack([control for _ in range(self.num_samples)], dim=0)
         control = einops.rearrange(control, 'b h w c -> b c h w').clone()
         self.seed = random.randint(0, 65535)
@@ -324,7 +329,7 @@ class line2image:
 
     def inference(self, inputs):
         print("===>Starting line2image Inference")
-        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
+        model = create_model('ControlNet/models/cldm_v15.yaml', device=self.device).to(self.device)
         model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_mlsd.pth', location='cpu'))
         model = model.to(self.device)
         ddim_sampler = DDIMSampler(model)
@@ -394,7 +399,7 @@ class hed2image:
 
     def inference(self, inputs):
         print("===>Starting hed2image Inference")
-        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
+        model = create_model('ControlNet/models/cldm_v15.yaml', device=self.device).to(self.device)
         model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_hed.pth', location='cpu'))
         model = model.to(self.device)
         ddim_sampler = DDIMSampler(model)
@@ -470,7 +475,7 @@ class scribble2image:
     def inference(self, inputs):
         print("===>Starting scribble2image Inference")
         print(f'sketch device {self.device}')
-        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
+        model = create_model('ControlNet/models/cldm_v15.yaml', device=self.device).to(self.device)
         model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_scribble.pth', location='cpu'))
         model = model.to(self.device)
         ddim_sampler = DDIMSampler(model)
@@ -541,7 +546,7 @@ class pose2image:
 
     def inference(self, inputs):
         print("===>Starting pose2image Inference")
-        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
+        model = create_model('ControlNet/models/cldm_v15.yaml', device=self.device).to(self.device)
         model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_openpose.pth', location='cpu'))
         model = model.to(self.device)
         ddim_sampler = DDIMSampler(model)
@@ -611,7 +616,7 @@ class seg2image:
 
     def inference(self, inputs):
         print("===>Starting seg2image Inference")
-        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
+        model = create_model('ControlNet/models/cldm_v15.yaml', device=self.device).to(self.device)
         model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_seg.pth', location='cpu'))
         model = model.to(self.device)
         ddim_sampler = DDIMSampler(model)
@@ -681,7 +686,7 @@ class depth2image:
 
     def inference(self, inputs):
         print("===>Starting depth2image Inference")
-        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
+        model = create_model('ControlNet/models/cldm_v15.yaml', device=self.device).to(self.device)
         model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_depth.pth', location='cpu'))
         model = model.to(self.device)
         ddim_sampler = DDIMSampler(model)
@@ -752,7 +757,7 @@ class normal2image:
 
     def inference(self, inputs):
         print("===>Starting normal2image Inference")
-        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
+        model = create_model('ControlNet/models/cldm_v15.yaml', device=self.device).to(self.device)
         model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_normal.pth', location='cpu'))
         model = model.to(self.device)
         ddim_sampler = DDIMSampler(model)
@@ -796,9 +801,9 @@ class BLIPVQA:
         image_path, question = inputs.split(",")
         raw_image = Image.open(image_path).convert('RGB')
         print(F'BLIPVQA :question :{question}')
-        inputs = self.processor(raw_image, question, return_tensors="pt").to(self.device)
+        inputs = processor(raw_image, question, return_tensors="pt").to(self.device)
         out = model.generate(**inputs)
-        answer = self.processor.decode(out[0], skip_special_tokens=True)
+        answer = processor.decode(out[0], skip_special_tokens=True)
         return answer
 
 class ConversationBot:
