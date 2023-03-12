@@ -23,16 +23,16 @@ import cv2
 import einops
 from pytorch_lightning import seed_everything
 import random
-from ldm.util import instantiate_from_config
-from ControlNet.cldm.model import create_model, load_state_dict
-from ControlNet.cldm.ddim_hacked import DDIMSampler
-from ControlNet.annotator.canny import CannyDetector
-from ControlNet.annotator.mlsd import MLSDdetector
-from ControlNet.annotator.util import HWC3, resize_image
-from ControlNet.annotator.hed import HEDdetector, nms
-from ControlNet.annotator.openpose import OpenposeDetector
-from ControlNet.annotator.uniformer import UniformerDetector
-from ControlNet.annotator.midas import MidasDetector
+from ldm.util import instantiate_from_config 
+from ControlNet.cldm.model import create_model, load_state_dict 
+from ControlNet.cldm.ddim_hacked import DDIMSampler 
+from ControlNet.annotator.canny import CannyDetector 
+from ControlNet.annotator.mlsd import MLSDdetector 
+from ControlNet.annotator.util import HWC3, resize_image 
+from ControlNet.annotator.hed import HEDdetector, nms 
+from ControlNet.annotator.openpose import OpenposeDetector 
+from ControlNet.annotator.uniformer import UniformerDetector 
+from ControlNet.annotator.midas import MidasDetector 
 
 VISUAL_CHATGPT_PREFIX = """Visual ChatGPT is designed to be able to assist with a wide range of text and visual related tasks, from answering simple questions to providing in-depth explanations and discussions on a wide range of topics. Visual ChatGPT is able to generate human-like text based on the input it receives, allowing it to engage in natural-sounding conversations and provide responses that are coherent and relevant to the topic at hand.
 
@@ -53,7 +53,7 @@ VISUAL_CHATGPT_FORMAT_INSTRUCTIONS = """To use a tool, please use the following 
 ```
 Thought: Do I need to use a tool? Yes
 Action: the action to take, should be one of [{tool_names}]
-Action Input: the input to the action
+Action Input: the input to the action translated to English (if applicable)
 Observation: the result of the action
 ```
 
@@ -63,6 +63,7 @@ When you have a response to say to the Human, or if you do not need to use a too
 Thought: Do I need to use a tool? No
 {ai_prefix}: [your response here]
 ```
+Please try to match human language as much as possible.
 """
 
 VISUAL_CHATGPT_SUFFIX = """You are very strict to the filename correctness and will never fake a file name if it does not exist.
@@ -119,18 +120,18 @@ def create_model(config_path, device):
 class MaskFormer:
     def __init__(self, device):
         self.device = device
-        self.processor = CLIPSegProcessor.from_pretrained("CIDAS/clipseg-rd64-refined")
-        self.model = CLIPSegForImageSegmentation.from_pretrained("CIDAS/clipseg-rd64-refined").to(device)
 
     def inference(self, image_path, text):
+        processor = CLIPSegProcessor.from_pretrained("CIDAS/clipseg-rd64-refined")
+        model = CLIPSegForImageSegmentation.from_pretrained("CIDAS/clipseg-rd64-refined").to(self.device)
         threshold = 0.5
         min_area = 0.02
         padding = 20
         original_image = Image.open(image_path)
         image = original_image.resize((512, 512))
-        inputs = self.processor(text=text, images=image, padding="max_length", return_tensors="pt",).to(self.device)
+        inputs = processor(text=text, images=image, padding="max_length", return_tensors="pt",).to(self.device)
         with torch.no_grad():
-            outputs = self.model(**inputs)
+            outputs = model(**inputs)
         mask = torch.sigmoid(outputs[0]).squeeze().cpu().numpy() > threshold
         area_ratio = len(np.argwhere(mask)) / (mask.shape[0] * mask.shape[1])
         if area_ratio < min_area:
@@ -148,8 +149,6 @@ class ImageEditing:
     def __init__(self, device):
         print("Initializing StableDiffusionInpaint to %s" % device)
         self.device = device
-        self.mask_former = MaskFormer(device=self.device)
-        self.inpainting = StableDiffusionInpaintPipeline.from_pretrained("runwayml/stable-diffusion-inpainting",).to(device)
 
     def remove_part_of_image(self, input):
         image_path, to_be_removed_txt = input.split(",")
@@ -157,11 +156,13 @@ class ImageEditing:
         return self.replace_part_of_image(f"{image_path},{to_be_removed_txt},background")
 
     def replace_part_of_image(self, input):
+        mask_former = MaskFormer(device=self.device)
+        inpainting = StableDiffusionInpaintPipeline.from_pretrained("runwayml/stable-diffusion-inpainting",).to(self.device)
         image_path, to_be_replaced_txt, replace_with_txt = input.split(",")
         print(f'replace_part_of_image: replace_with_txt {replace_with_txt}')
         original_image = Image.open(image_path)
-        mask_image = self.mask_former.inference(image_path, to_be_replaced_txt)
-        updated_image = self.inpainting(prompt=replace_with_txt, image=original_image, mask_image=mask_image).images[0]
+        mask_image = mask_former.inference(image_path, to_be_replaced_txt)
+        updated_image = inpainting(prompt=replace_with_txt, image=original_image, mask_image=mask_image).images[0]
         updated_image_path = get_new_image_name(image_path, func_name="replace-something")
         updated_image.save(updated_image_path)
         return updated_image_path
@@ -170,15 +171,16 @@ class Pix2Pix:
     def __init__(self, device):
         print("Initializing Pix2Pix to %s" % device)
         self.device = device
-        self.pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained("timbrooks/instruct-pix2pix", torch_dtype=torch.float16, safety_checker=None).to(device)
-        self.pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(self.pipe.scheduler.config)
+
 
     def inference(self, inputs):
         """Change style of image."""
         print("===>Starting Pix2Pix Inference")
+        pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained("timbrooks/instruct-pix2pix", torch_dtype=torch.float16, safety_checker=None).to(self.device)
+        pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(self.pipe.scheduler.config)
         image_path, instruct_text = inputs.split(",")[0], ','.join(inputs.split(',')[1:])
         original_image = Image.open(image_path)
-        image = self.pipe(instruct_text,image=original_image,num_inference_steps=40,image_guidance_scale=1.2,).images[0]
+        image = pipe(instruct_text,image=original_image,num_inference_steps=40,image_guidance_scale=1.2,).images[0]
         updated_image_path = get_new_image_name(image_path, func_name="pix2pix")
         image.save(updated_image_path)
         return updated_image_path
@@ -187,17 +189,17 @@ class T2I:
     def __init__(self, device):
         print("Initializing T2I to %s" % device)
         self.device = device
-        self.pipe = StableDiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", torch_dtype=torch.float16)
-        self.text_refine_tokenizer = AutoTokenizer.from_pretrained("Gustavosta/MagicPrompt-Stable-Diffusion")
-        self.text_refine_model = AutoModelForCausalLM.from_pretrained("Gustavosta/MagicPrompt-Stable-Diffusion")
-        self.text_refine_gpt2_pipe = pipeline("text-generation", model=self.text_refine_model, tokenizer=self.text_refine_tokenizer, device=self.device)
-        self.pipe.to(device)
 
     def inference(self, text):
+        pipe = StableDiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", torch_dtype=torch.float16)
+        text_refine_tokenizer = AutoTokenizer.from_pretrained("Gustavosta/MagicPrompt-Stable-Diffusion")
+        text_refine_model = AutoModelForCausalLM.from_pretrained("Gustavosta/MagicPrompt-Stable-Diffusion")
+        text_refine_gpt2_pipe = pipeline("text-generation", model=text_refine_model, tokenizer=text_refine_tokenizer, device=self.device)
+        pipe.to(self.device)
         image_filename = os.path.join('image', str(uuid.uuid4())[0:8] + ".png")
-        refined_text = self.text_refine_gpt2_pipe(text)[0]["generated_text"]
+        refined_text = text_refine_gpt2_pipe(text)[0]["generated_text"]
         print(f'{text} refined to {refined_text}')
-        image = self.pipe(refined_text).images[0]
+        image = pipe(refined_text).images[0]
         image.save(image_filename)
         print(f"Processed T2I.run, text: {text}, image_filename: {image_filename}")
         return image_filename
@@ -206,27 +208,27 @@ class ImageCaptioning:
     def __init__(self, device):
         print("Initializing ImageCaptioning to %s" % device)
         self.device = device
-        self.processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-        self.model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base").to(self.device)
 
     def inference(self, image_path):
-        inputs = self.processor(Image.open(image_path), return_tensors="pt").to(self.device)
-        out = self.model.generate(**inputs)
-        captions = self.processor.decode(out[0], skip_special_tokens=True)
+        processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+        model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base").to(self.device)
+        inputs = processor(Image.open(image_path), return_tensors="pt").to(self.device)
+        out = model.generate(**inputs)
+        captions = processor.decode(out[0], skip_special_tokens=True)
         return captions
 
 class image2canny:
     def __init__(self):
         print("Direct detect canny.")
-        self.detector = CannyDetector()
         self.low_thresh = 100
         self.high_thresh = 200
 
     def inference(self, inputs):
         print("===>Starting image2canny Inference")
+        detector = CannyDetector()
         image = Image.open(inputs)
         image = np.array(image)
-        canny = self.detector(image, self.low_thresh, self.high_thresh)
+        canny = detector(image, self.low_thresh, self.high_thresh)
         canny = 255 - canny
         image = Image.fromarray(canny)
         updated_image_path = get_new_image_name(inputs, func_name="edge")
@@ -236,11 +238,8 @@ class image2canny:
 class canny2image:
     def __init__(self, device):
         print("Initialize the canny2image model.")
-        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
-        model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_canny.pth', location='cpu'))
-        self.model = model.to(device)
+       
         self.device = device
-        self.ddim_sampler = DDIMSampler(self.model)
         self.ddim_steps = 20
         self.image_resolution = 512
         self.num_samples = 1
@@ -254,6 +253,11 @@ class canny2image:
 
     def inference(self, inputs):
         print("===>Starting canny2image Inference")
+        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
+        model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_canny.pth', location='cpu'))
+        model = model.to(self.device)
+        ddim_sampler = DDIMSampler(model)
+
         image_path, instruct_text = inputs.split(",")[0], ','.join(inputs.split(',')[1:])
         image = Image.open(image_path)
         image = np.array(image)
@@ -267,15 +271,15 @@ class canny2image:
         self.seed = random.randint(0, 65535)
         seed_everything(self.seed)
         if self.save_memory:
-            self.model.low_vram_shift(is_diffusing=False)
-        cond = {"c_concat": [control], "c_crossattn": [self.model.get_learned_conditioning([prompt + ', ' + self.a_prompt] * self.num_samples)]}
-        un_cond = {"c_concat": None if self.guess_mode else [control], "c_crossattn": [self.model.get_learned_conditioning([self.n_prompt] * self.num_samples)]}
+            model.low_vram_shift(is_diffusing=False)
+        cond = {"c_concat": [control], "c_crossattn": [model.get_learned_conditioning([prompt + ', ' + self.a_prompt] * self.num_samples)]}
+        un_cond = {"c_concat": None if self.guess_mode else [control], "c_crossattn": [model.get_learned_conditioning([self.n_prompt] * self.num_samples)]}
         shape = (4, H // 8, W // 8)
-        self.model.control_scales = [self.strength * (0.825 ** float(12 - i)) for i in range(13)] if self.guess_mode else ([self.strength] * 13)  # Magic number. IDK why. Perhaps because 0.825**12<0.01 but 0.826**12>0.01
-        samples, intermediates = self.ddim_sampler.sample(self.ddim_steps, self.num_samples, shape, cond, verbose=False, eta=0., unconditional_guidance_scale=self.scale, unconditional_conditioning=un_cond)
+        model.control_scales = [self.strength * (0.825 ** float(12 - i)) for i in range(13)] if self.guess_mode else ([self.strength] * 13)  # Magic number. IDK why. Perhaps because 0.825**12<0.01 but 0.826**12>0.01
+        samples, intermediates = ddim_sampler.sample(self.ddim_steps, self.num_samples, shape, cond, verbose=False, eta=0., unconditional_guidance_scale=self.scale, unconditional_conditioning=un_cond)
         if self.save_memory:
-            self.model.low_vram_shift(is_diffusing=False)
-        x_samples = self.model.decode_first_stage(samples)
+            model.low_vram_shift(is_diffusing=False)
+        x_samples = model.decode_first_stage(samples)
         x_samples = (einops.rearrange(x_samples, 'b c h w -> b h w c') * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
         updated_image_path = get_new_image_name(image_path, func_name="canny2image")
         real_image = Image.fromarray(x_samples[0])  # get default the index0 image
@@ -285,17 +289,17 @@ class canny2image:
 class image2line:
     def __init__(self):
         print("Direct detect straight line...")
-        self.detector = MLSDdetector()
         self.value_thresh = 0.1
         self.dis_thresh = 0.1
         self.resolution = 512
 
     def inference(self, inputs):
         print("===>Starting image2hough Inference")
+        detector = MLSDdetector()
         image = Image.open(inputs)
         image = np.array(image)
         image = HWC3(image)
-        hough = self.detector(resize_image(image, self.resolution), self.value_thresh, self.dis_thresh)
+        hough = detector(resize_image(image, self.resolution), self.value_thresh, self.dis_thresh)
         updated_image_path = get_new_image_name(inputs, func_name="line-of")
         hough = 255 - cv2.dilate(hough, np.ones(shape=(3, 3), dtype=np.uint8), iterations=1)
         image = Image.fromarray(hough)
@@ -306,11 +310,7 @@ class image2line:
 class line2image:
     def __init__(self, device):
         print("Initialize the line2image model...")
-        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
-        model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_mlsd.pth', location='cpu'))
-        self.model = model.to(device)
         self.device = device
-        self.ddim_sampler = DDIMSampler(self.model)
         self.ddim_steps = 20
         self.image_resolution = 512
         self.num_samples = 1
@@ -324,6 +324,10 @@ class line2image:
 
     def inference(self, inputs):
         print("===>Starting line2image Inference")
+        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
+        model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_mlsd.pth', location='cpu'))
+        model = model.to(self.device)
+        ddim_sampler = DDIMSampler(model)
         image_path, instruct_text = inputs.split(",")[0], ','.join(inputs.split(',')[1:])
         image = Image.open(image_path)
         image = np.array(image)
@@ -338,15 +342,15 @@ class line2image:
         self.seed = random.randint(0, 65535)
         seed_everything(self.seed)
         if self.save_memory:
-            self.model.low_vram_shift(is_diffusing=False)
-        cond = {"c_concat": [control], "c_crossattn": [self.model.get_learned_conditioning([prompt + ', ' + self.a_prompt] * self.num_samples)]}
-        un_cond = {"c_concat": None if self.guess_mode else [control], "c_crossattn": [self.model.get_learned_conditioning([self.n_prompt] * self.num_samples)]}
+            model.low_vram_shift(is_diffusing=False)
+        cond = {"c_concat": [control], "c_crossattn": [model.get_learned_conditioning([prompt + ', ' + self.a_prompt] * self.num_samples)]}
+        un_cond = {"c_concat": None if self.guess_mode else [control], "c_crossattn": [model.get_learned_conditioning([self.n_prompt] * self.num_samples)]}
         shape = (4, H // 8, W // 8)
-        self.model.control_scales = [self.strength * (0.825 ** float(12 - i)) for i in range(13)] if self.guess_mode else ([self.strength] * 13)  # Magic number. IDK why. Perhaps because 0.825**12<0.01 but 0.826**12>0.01
-        samples, intermediates = self.ddim_sampler.sample(self.ddim_steps, self.num_samples, shape, cond, verbose=False, eta=0., unconditional_guidance_scale=self.scale, unconditional_conditioning=un_cond)
+        model.control_scales = [self.strength * (0.825 ** float(12 - i)) for i in range(13)] if self.guess_mode else ([self.strength] * 13)  # Magic number. IDK why. Perhaps because 0.825**12<0.01 but 0.826**12>0.01
+        samples, intermediates = ddim_sampler.sample(self.ddim_steps, self.num_samples, shape, cond, verbose=False, eta=0., unconditional_guidance_scale=self.scale, unconditional_conditioning=un_cond)
         if self.save_memory:
-            self.model.low_vram_shift(is_diffusing=False)
-        x_samples = self.model.decode_first_stage(samples)
+            model.low_vram_shift(is_diffusing=False)
+        x_samples = model.decode_first_stage(samples)
         x_samples = (einops.rearrange(x_samples, 'b c h w -> b h w c') * 127.5 + 127.5).\
             cpu().numpy().clip(0,255).astype(np.uint8)
         updated_image_path = get_new_image_name(image_path, func_name="line2image")
@@ -358,15 +362,15 @@ class line2image:
 class image2hed:
     def __init__(self):
         print("Direct detect soft HED boundary...")
-        self.detector = HEDdetector()
         self.resolution = 512
 
     def inference(self, inputs):
         print("===>Starting image2hed Inference")
+        detector = HEDdetector()
         image = Image.open(inputs)
         image = np.array(image)
         image = HWC3(image)
-        hed = self.detector(resize_image(image, self.resolution))
+        hed = detector(resize_image(image, self.resolution))
         updated_image_path = get_new_image_name(inputs, func_name="hed-boundary")
         image = Image.fromarray(hed)
         image.save(updated_image_path)
@@ -376,11 +380,7 @@ class image2hed:
 class hed2image:
     def __init__(self, device):
         print("Initialize the hed2image model...")
-        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
-        model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_hed.pth', location='cpu'))
-        self.model = model.to(device)
         self.device = device
-        self.ddim_sampler = DDIMSampler(self.model)
         self.ddim_steps = 20
         self.image_resolution = 512
         self.num_samples = 1
@@ -394,6 +394,10 @@ class hed2image:
 
     def inference(self, inputs):
         print("===>Starting hed2image Inference")
+        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
+        model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_hed.pth', location='cpu'))
+        model = model.to(self.device)
+        ddim_sampler = DDIMSampler(model)
         image_path, instruct_text = inputs.split(",")[0], ','.join(inputs.split(',')[1:])
         image = Image.open(image_path)
         image = np.array(image)
@@ -407,15 +411,15 @@ class hed2image:
         self.seed = random.randint(0, 65535)
         seed_everything(self.seed)
         if self.save_memory:
-            self.model.low_vram_shift(is_diffusing=False)
-        cond = {"c_concat": [control], "c_crossattn": [self.model.get_learned_conditioning([prompt + ', ' + self.a_prompt] * self.num_samples)]}
-        un_cond = {"c_concat": None if self.guess_mode else [control], "c_crossattn": [self.model.get_learned_conditioning([self.n_prompt] * self.num_samples)]}
+            model.low_vram_shift(is_diffusing=False)
+        cond = {"c_concat": [control], "c_crossattn": [model.get_learned_conditioning([prompt + ', ' + self.a_prompt] * self.num_samples)]}
+        un_cond = {"c_concat": None if self.guess_mode else [control], "c_crossattn": [model.get_learned_conditioning([self.n_prompt] * self.num_samples)]}
         shape = (4, H // 8, W // 8)
-        self.model.control_scales = [self.strength * (0.825 ** float(12 - i)) for i in range(13)] if self.guess_mode else ([self.strength] * 13)
-        samples, intermediates = self.ddim_sampler.sample(self.ddim_steps, self.num_samples, shape, cond, verbose=False, eta=0., unconditional_guidance_scale=self.scale, unconditional_conditioning=un_cond)
+        model.control_scales = [self.strength * (0.825 ** float(12 - i)) for i in range(13)] if self.guess_mode else ([self.strength] * 13)
+        samples, intermediates = ddim_sampler.sample(self.ddim_steps, self.num_samples, shape, cond, verbose=False, eta=0., unconditional_guidance_scale=self.scale, unconditional_conditioning=un_cond)
         if self.save_memory:
-            self.model.low_vram_shift(is_diffusing=False)
-        x_samples = self.model.decode_first_stage(samples)
+            model.low_vram_shift(is_diffusing=False)
+        x_samples = model.decode_first_stage(samples)
         x_samples = (einops.rearrange(x_samples, 'b c h w -> b h w c') * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
         updated_image_path = get_new_image_name(image_path, func_name="hed2image")
         real_image = Image.fromarray(x_samples[0])  # default the index0 image
@@ -425,15 +429,15 @@ class hed2image:
 class image2scribble:
     def __init__(self):
         print("Direct detect scribble.")
-        self.detector = HEDdetector()
         self.resolution = 512
 
     def inference(self, inputs):
         print("===>Starting image2scribble Inference")
+        detector = HEDdetector()
         image = Image.open(inputs)
         image = np.array(image)
         image = HWC3(image)
-        detected_map = self.detector(resize_image(image, self.resolution))
+        detected_map = detector(resize_image(image, self.resolution))
         detected_map = HWC3(detected_map)
         image = resize_image(image, self.resolution)
         H, W, C = image.shape
@@ -451,11 +455,7 @@ class image2scribble:
 class scribble2image:
     def __init__(self, device):
         print("Initialize the scribble2image model...")
-        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
-        model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_scribble.pth', location='cpu'))
-        self.model = model.to(device)
         self.device = device
-        self.ddim_sampler = DDIMSampler(self.model)
         self.ddim_steps = 20
         self.image_resolution = 512
         self.num_samples = 1
@@ -470,6 +470,10 @@ class scribble2image:
     def inference(self, inputs):
         print("===>Starting scribble2image Inference")
         print(f'sketch device {self.device}')
+        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
+        model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_scribble.pth', location='cpu'))
+        model = model.to(self.device)
+        ddim_sampler = DDIMSampler(model)
         image_path, instruct_text = inputs.split(",")[0], ','.join(inputs.split(',')[1:])
         image = Image.open(image_path)
         image = np.array(image)
@@ -484,15 +488,15 @@ class scribble2image:
         self.seed = random.randint(0, 65535)
         seed_everything(self.seed)
         if self.save_memory:
-            self.model.low_vram_shift(is_diffusing=False)
-        cond = {"c_concat": [control], "c_crossattn": [self.model.get_learned_conditioning([prompt + ', ' + self.a_prompt] * self.num_samples)]}
-        un_cond = {"c_concat": None if self.guess_mode else [control], "c_crossattn": [self.model.get_learned_conditioning([self.n_prompt] * self.num_samples)]}
+            model.low_vram_shift(is_diffusing=False)
+        cond = {"c_concat": [control], "c_crossattn": [model.get_learned_conditioning([prompt + ', ' + self.a_prompt] * self.num_samples)]}
+        un_cond = {"c_concat": None if self.guess_mode else [control], "c_crossattn": [model.get_learned_conditioning([self.n_prompt] * self.num_samples)]}
         shape = (4, H // 8, W // 8)
-        self.model.control_scales = [self.strength * (0.825 ** float(12 - i)) for i in range(13)] if self.guess_mode else ([self.strength] * 13)
-        samples, intermediates = self.ddim_sampler.sample(self.ddim_steps, self.num_samples, shape, cond, verbose=False, eta=0., unconditional_guidance_scale=self.scale, unconditional_conditioning=un_cond)
+        model.control_scales = [self.strength * (0.825 ** float(12 - i)) for i in range(13)] if self.guess_mode else ([self.strength] * 13)
+        samples, intermediates = ddim_sampler.sample(self.ddim_steps, self.num_samples, shape, cond, verbose=False, eta=0., unconditional_guidance_scale=self.scale, unconditional_conditioning=un_cond)
         if self.save_memory:
-            self.model.low_vram_shift(is_diffusing=False)
-        x_samples = self.model.decode_first_stage(samples)
+            model.low_vram_shift(is_diffusing=False)
+        x_samples = model.decode_first_stage(samples)
         x_samples = (einops.rearrange(x_samples, 'b c h w -> b h w c') * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
         updated_image_path = get_new_image_name(image_path, func_name="scribble2image")
         real_image = Image.fromarray(x_samples[0])  # default the index0 image
@@ -502,15 +506,15 @@ class scribble2image:
 class image2pose:
     def __init__(self):
         print("Direct human pose.")
-        self.detector = OpenposeDetector()
         self.resolution = 512
 
     def inference(self, inputs):
         print("===>Starting image2pose Inference")
+        detector = OpenposeDetector()
         image = Image.open(inputs)
         image = np.array(image)
         image = HWC3(image)
-        detected_map, _ = self.detector(resize_image(image, self.resolution))
+        detected_map, _ = detector(resize_image(image, self.resolution))
         detected_map = HWC3(detected_map)
         image = resize_image(image, self.resolution)
         H, W, C = image.shape
@@ -523,11 +527,7 @@ class image2pose:
 class pose2image:
     def __init__(self, device):
         print("Initialize the pose2image model...")
-        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
-        model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_openpose.pth', location='cpu'))
-        self.model = model.to(device)
         self.device = device
-        self.ddim_sampler = DDIMSampler(self.model)
         self.ddim_steps = 20
         self.image_resolution = 512
         self.num_samples = 1
@@ -541,6 +541,10 @@ class pose2image:
 
     def inference(self, inputs):
         print("===>Starting pose2image Inference")
+        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
+        model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_openpose.pth', location='cpu'))
+        model = model.to(self.device)
+        ddim_sampler = DDIMSampler(model)
         image_path, instruct_text = inputs.split(",")[0], ','.join(inputs.split(',')[1:])
         image = Image.open(image_path)
         image = np.array(image)
@@ -554,15 +558,15 @@ class pose2image:
         self.seed = random.randint(0, 65535)
         seed_everything(self.seed)
         if self.save_memory:
-            self.model.low_vram_shift(is_diffusing=False)
-        cond = {"c_concat": [control], "c_crossattn": [ self.model.get_learned_conditioning([prompt + ', ' + self.a_prompt] * self.num_samples)]}
-        un_cond = {"c_concat": None if self.guess_mode else [control], "c_crossattn": [self.model.get_learned_conditioning([self.n_prompt] * self.num_samples)]}
+            model.low_vram_shift(is_diffusing=False)
+        cond = {"c_concat": [control], "c_crossattn": [ model.get_learned_conditioning([prompt + ', ' + self.a_prompt] * self.num_samples)]}
+        un_cond = {"c_concat": None if self.guess_mode else [control], "c_crossattn": [model.get_learned_conditioning([self.n_prompt] * self.num_samples)]}
         shape = (4, H // 8, W // 8)
-        self.model.control_scales = [self.strength * (0.825 ** float(12 - i)) for i in range(13)] if self.guess_mode else ([self.strength] * 13)
-        samples, intermediates = self.ddim_sampler.sample(self.ddim_steps, self.num_samples, shape, cond, verbose=False, eta=0., unconditional_guidance_scale=self.scale, unconditional_conditioning=un_cond)
+        model.control_scales = [self.strength * (0.825 ** float(12 - i)) for i in range(13)] if self.guess_mode else ([self.strength] * 13)
+        samples, intermediates = ddim_sampler.sample(self.ddim_steps, self.num_samples, shape, cond, verbose=False, eta=0., unconditional_guidance_scale=self.scale, unconditional_conditioning=un_cond)
         if self.save_memory:
-            self.model.low_vram_shift(is_diffusing=False)
-        x_samples = self.model.decode_first_stage(samples)
+            model.low_vram_shift(is_diffusing=False)
+        x_samples = model.decode_first_stage(samples)
         x_samples = (einops.rearrange(x_samples, 'b c h w -> b h w c') * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
         updated_image_path = get_new_image_name(image_path, func_name="pose2image")
         real_image = Image.fromarray(x_samples[0])  # default the index0 image
@@ -593,11 +597,7 @@ class image2seg:
 class seg2image:
     def __init__(self, device):
         print("Initialize the seg2image model...")
-        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
-        model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_seg.pth', location='cpu'))
-        self.model = model.to(device)
         self.device = device
-        self.ddim_sampler = DDIMSampler(self.model)
         self.ddim_steps = 20
         self.image_resolution = 512
         self.num_samples = 1
@@ -611,6 +611,10 @@ class seg2image:
 
     def inference(self, inputs):
         print("===>Starting seg2image Inference")
+        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
+        model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_seg.pth', location='cpu'))
+        model = model.to(self.device)
+        ddim_sampler = DDIMSampler(model)
         image_path, instruct_text = inputs.split(",")[0], ','.join(inputs.split(',')[1:])
         image = Image.open(image_path)
         image = np.array(image)
@@ -624,15 +628,15 @@ class seg2image:
         self.seed = random.randint(0, 65535)
         seed_everything(self.seed)
         if self.save_memory:
-            self.model.low_vram_shift(is_diffusing=False)
-        cond = {"c_concat": [control], "c_crossattn": [self.model.get_learned_conditioning([prompt + ', ' + self.a_prompt] * self.num_samples)]}
-        un_cond = {"c_concat": None if self.guess_mode else [control], "c_crossattn": [self.model.get_learned_conditioning([self.n_prompt] * self.num_samples)]}
+            model.low_vram_shift(is_diffusing=False)
+        cond = {"c_concat": [control], "c_crossattn": [model.get_learned_conditioning([prompt + ', ' + self.a_prompt] * self.num_samples)]}
+        un_cond = {"c_concat": None if self.guess_mode else [control], "c_crossattn": [model.get_learned_conditioning([self.n_prompt] * self.num_samples)]}
         shape = (4, H // 8, W // 8)
-        self.model.control_scales = [self.strength * (0.825 ** float(12 - i)) for i in range(13)] if self.guess_mode else ([self.strength] * 13)
-        samples, intermediates = self.ddim_sampler.sample(self.ddim_steps, self.num_samples, shape, cond, verbose=False, eta=0., unconditional_guidance_scale=self.scale, unconditional_conditioning=un_cond)
+        model.control_scales = [self.strength * (0.825 ** float(12 - i)) for i in range(13)] if self.guess_mode else ([self.strength] * 13)
+        samples, intermediates = ddim_sampler.sample(self.ddim_steps, self.num_samples, shape, cond, verbose=False, eta=0., unconditional_guidance_scale=self.scale, unconditional_conditioning=un_cond)
         if self.save_memory:
-            self.model.low_vram_shift(is_diffusing=False)
-        x_samples = self.model.decode_first_stage(samples)
+            model.low_vram_shift(is_diffusing=False)
+        x_samples = model.decode_first_stage(samples)
         x_samples = (einops.rearrange(x_samples, 'b c h w -> b h w c') * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
         updated_image_path = get_new_image_name(image_path, func_name="segment2image")
         real_image = Image.fromarray(x_samples[0])  # default the index0 image
@@ -642,15 +646,15 @@ class seg2image:
 class image2depth:
     def __init__(self):
         print("Direct depth estimation.")
-        self.detector = MidasDetector()
         self.resolution = 512
 
     def inference(self, inputs):
         print("===>Starting image2depth Inference")
+        detector = MidasDetector()
         image = Image.open(inputs)
         image = np.array(image)
         image = HWC3(image)
-        detected_map, _ = self.detector(resize_image(image, self.resolution))
+        detected_map, _ = detector(resize_image(image, self.resolution))
         detected_map = HWC3(detected_map)
         image = resize_image(image, self.resolution)
         H, W, C = image.shape
@@ -663,11 +667,7 @@ class image2depth:
 class depth2image:
     def __init__(self, device):
         print("Initialize depth2image model...")
-        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
-        model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_depth.pth', location='cpu'))
-        self.model = model.to(device)
         self.device = device
-        self.ddim_sampler = DDIMSampler(self.model)
         self.ddim_steps = 20
         self.image_resolution = 512
         self.num_samples = 1
@@ -681,6 +681,10 @@ class depth2image:
 
     def inference(self, inputs):
         print("===>Starting depth2image Inference")
+        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
+        model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_depth.pth', location='cpu'))
+        model = model.to(self.device)
+        ddim_sampler = DDIMSampler(model)
         image_path, instruct_text = inputs.split(",")[0], ','.join(inputs.split(',')[1:])
         image = Image.open(image_path)
         image = np.array(image)
@@ -694,15 +698,15 @@ class depth2image:
         self.seed = random.randint(0, 65535)
         seed_everything(self.seed)
         if self.save_memory:
-            self.model.low_vram_shift(is_diffusing=False)
-        cond = {"c_concat": [control], "c_crossattn": [ self.model.get_learned_conditioning([prompt + ', ' + self.a_prompt] * self.num_samples)]}
-        un_cond = {"c_concat": None if self.guess_mode else [control], "c_crossattn": [self.model.get_learned_conditioning([self.n_prompt] * self.num_samples)]}
+            model.low_vram_shift(is_diffusing=False)
+        cond = {"c_concat": [control], "c_crossattn": [ model.get_learned_conditioning([prompt + ', ' + self.a_prompt] * self.num_samples)]}
+        un_cond = {"c_concat": None if self.guess_mode else [control], "c_crossattn": [model.get_learned_conditioning([self.n_prompt] * self.num_samples)]}
         shape = (4, H // 8, W // 8)
-        self.model.control_scales = [self.strength * (0.825 ** float(12 - i)) for i in range(13)] if self.guess_mode else ([self.strength] * 13)  # Magic number. IDK why. Perhaps because 0.825**12<0.01 but 0.826**12>0.01
-        samples, intermediates = self.ddim_sampler.sample(self.ddim_steps, self.num_samples, shape, cond, verbose=False, eta=0., unconditional_guidance_scale=self.scale, unconditional_conditioning=un_cond)
+        model.control_scales = [self.strength * (0.825 ** float(12 - i)) for i in range(13)] if self.guess_mode else ([self.strength] * 13)  # Magic number. IDK why. Perhaps because 0.825**12<0.01 but 0.826**12>0.01
+        samples, intermediates = ddim_sampler.sample(self.ddim_steps, self.num_samples, shape, cond, verbose=False, eta=0., unconditional_guidance_scale=self.scale, unconditional_conditioning=un_cond)
         if self.save_memory:
-            self.model.low_vram_shift(is_diffusing=False)
-        x_samples = self.model.decode_first_stage(samples)
+            model.low_vram_shift(is_diffusing=False)
+        x_samples = model.decode_first_stage(samples)
         x_samples = (einops.rearrange(x_samples, 'b c h w -> b h w c') * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
         updated_image_path = get_new_image_name(image_path, func_name="depth2image")
         real_image = Image.fromarray(x_samples[0])  # default the index0 image
@@ -734,11 +738,7 @@ class image2normal:
 class normal2image:
     def __init__(self, device):
         print("Initialize normal2image model...")
-        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
-        model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_normal.pth', location='cpu'))
-        self.model = model.to(device)
         self.device = device
-        self.ddim_sampler = DDIMSampler(self.model)
         self.ddim_steps = 20
         self.image_resolution = 512
         self.num_samples = 1
@@ -752,6 +752,10 @@ class normal2image:
 
     def inference(self, inputs):
         print("===>Starting normal2image Inference")
+        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
+        model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_normal.pth', location='cpu'))
+        model = model.to(self.device)
+        ddim_sampler = DDIMSampler(model)
         image_path, instruct_text = inputs.split(",")[0], ','.join(inputs.split(',')[1:])
         image = Image.open(image_path)
         image = np.array(image)
@@ -766,15 +770,15 @@ class normal2image:
         self.seed = random.randint(0, 65535)
         seed_everything(self.seed)
         if self.save_memory:
-            self.model.low_vram_shift(is_diffusing=False)
-        cond = {"c_concat": [control], "c_crossattn": [self.model.get_learned_conditioning([prompt + ', ' + self.a_prompt] * self.num_samples)]}
-        un_cond = {"c_concat": None if self.guess_mode else [control], "c_crossattn": [self.model.get_learned_conditioning([self.n_prompt] * self.num_samples)]}
+            model.low_vram_shift(is_diffusing=False)
+        cond = {"c_concat": [control], "c_crossattn": [model.get_learned_conditioning([prompt + ', ' + self.a_prompt] * self.num_samples)]}
+        un_cond = {"c_concat": None if self.guess_mode else [control], "c_crossattn": [model.get_learned_conditioning([self.n_prompt] * self.num_samples)]}
         shape = (4, H // 8, W // 8)
-        self.model.control_scales = [self.strength * (0.825 ** float(12 - i)) for i in range(13)] if self.guess_mode else ([self.strength] * 13)
-        samples, intermediates = self.ddim_sampler.sample(self.ddim_steps, self.num_samples, shape, cond, verbose=False, eta=0., unconditional_guidance_scale=self.scale, unconditional_conditioning=un_cond)
+        model.control_scales = [self.strength * (0.825 ** float(12 - i)) for i in range(13)] if self.guess_mode else ([self.strength] * 13)
+        samples, intermediates = ddim_sampler.sample(self.ddim_steps, self.num_samples, shape, cond, verbose=False, eta=0., unconditional_guidance_scale=self.scale, unconditional_conditioning=un_cond)
         if self.save_memory:
-            self.model.low_vram_shift(is_diffusing=False)
-        x_samples = self.model.decode_first_stage(samples)
+            model.low_vram_shift(is_diffusing=False)
+        x_samples = model.decode_first_stage(samples)
         x_samples = (einops.rearrange(x_samples, 'b c h w -> b h w c') * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
         updated_image_path = get_new_image_name(image_path, func_name="normal2image")
         real_image = Image.fromarray(x_samples[0])  # default the index0 image
@@ -785,15 +789,15 @@ class BLIPVQA:
     def __init__(self, device):
         print("Initializing BLIP VQA to %s" % device)
         self.device = device
-        self.processor = BlipProcessor.from_pretrained("Salesforce/blip-vqa-base")
-        self.model = BlipForQuestionAnswering.from_pretrained("Salesforce/blip-vqa-base").to(self.device)
 
     def get_answer_from_question_and_image(self, inputs):
+        processor = BlipProcessor.from_pretrained("Salesforce/blip-vqa-base")
+        model = BlipForQuestionAnswering.from_pretrained("Salesforce/blip-vqa-base").to(self.device)
         image_path, question = inputs.split(",")
         raw_image = Image.open(image_path).convert('RGB')
         print(F'BLIPVQA :question :{question}')
         inputs = self.processor(raw_image, question, return_tensors="pt").to(self.device)
-        out = self.model.generate(**inputs)
+        out = model.generate(**inputs)
         answer = self.processor.decode(out[0], skip_special_tokens=True)
         return answer
 
@@ -801,27 +805,27 @@ class ConversationBot:
     def __init__(self):
         print("Initializing VisualChatGPT")
         self.llm = OpenAI(temperature=0)
-        self.edit = ImageEditing(device="cuda:6")
-        self.i2t = ImageCaptioning(device="cuda:4")
-        self.t2i = T2I(device="cuda:1")
+        self.edit = ImageEditing(device="cuda:0")
+        self.i2t = ImageCaptioning(device="cuda:0")
+        self.t2i = T2I(device="cuda:0")
         self.image2canny = image2canny()
-        self.canny2image = canny2image(device="cuda:1")
+        self.canny2image = canny2image(device="cuda:0")
         self.image2line = image2line()
-        self.line2image = line2image(device="cuda:1")
+        self.line2image = line2image(device="cuda:0")
         self.image2hed = image2hed()
-        self.hed2image = hed2image(device="cuda:2")
+        self.hed2image = hed2image(device="cuda:0")
         self.image2scribble = image2scribble()
-        self.scribble2image = scribble2image(device="cuda:3")
+        self.scribble2image = scribble2image(device="cuda:0")
         self.image2pose = image2pose()
-        self.pose2image = pose2image(device="cuda:3")
-        self.BLIPVQA = BLIPVQA(device="cuda:4")
+        self.pose2image = pose2image(device="cuda:0")
+        self.BLIPVQA = BLIPVQA(device="cuda:0")
         self.image2seg = image2seg()
-        self.seg2image = seg2image(device="cuda:7")
+        self.seg2image = seg2image(device="cuda:0")
         self.image2depth = image2depth()
-        self.depth2image = depth2image(device="cuda:7")
+        self.depth2image = depth2image(device="cuda:0")
         self.image2normal = image2normal()
-        self.normal2image = normal2image(device="cuda:5")
-        self.pix2pix = Pix2Pix(device="cuda:3")
+        self.normal2image = normal2image(device="cuda:0")
+        self.pix2pix = Pix2Pix(device="cuda:0")
         self.memory = ConversationBufferMemory(memory_key="chat_history", output_key='output')
         self.tools = [
             Tool(name="Get Photo Description", func=self.i2t.inference,
@@ -907,7 +911,7 @@ class ConversationBot:
         self.agent.memory.buffer = cut_dialogue_history(self.agent.memory.buffer, keep_last_n_words=500)
         res = self.agent({"input": text})
         print("======>Current memory:\n %s" % self.agent.memory)
-        response = re.sub('(image/\S*png)', lambda m: f'![](/file={m.group(0)})*{m.group(0)}*', res['output'])
+        response = re.sub('(image[/\\\\]\S*png)', lambda m: f'![](/file={m.group(0)})*{m.group(0)}*', res['output'])
         state = state + [(text, response)]
         print("Outputs:", state)
         return state, state
