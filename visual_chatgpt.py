@@ -36,9 +36,9 @@ from ControlNet.annotator.midas import MidasDetector
 
 VISUAL_CHATGPT_PREFIX = """Visual ChatGPT is designed to be able to assist with a wide range of text and visual related tasks, from answering simple questions to providing in-depth explanations and discussions on a wide range of topics. Visual ChatGPT is able to generate human-like text based on the input it receives, allowing it to engage in natural-sounding conversations and provide responses that are coherent and relevant to the topic at hand.
 
-Visual ChatGPT is able to process and understand large amounts of text and images. As a language model, Visual ChatGPT can not directly read images, but it has a list of tools to finish different visual tasks. Each image will have a file name formed as "image/xxx.png", and Visual ChatGPT can invoke different tools to indirectly understand pictures. When talking about images, Visual ChatGPT is very strict to the file name and will never fabricate nonexistent files. When using tools to generate new image files, Visual ChatGPT is also known that the image may not be the same as the user's demand, and will use other visual question answering tools or description tools to observe the real image. Visual ChatGPT is able to use tools in a sequence, and is loyal to the tool observation outputs rather than faking the image content and image file name. It will remember to provide the file name from the last tool observation, if a new image is generated.
+Visual ChatGPT is able to process and understand large amounts of text and images. As a language model, Visual ChatGPT can not directly read images, but it has a list of tools to finish different visual tasks. Each image will have a file name formed as "image/xxx.png", and Visual ChatGPT can invoke different tools to indirectly understand pictures. When talking about images, Visual ChatGPT is very strict to the file name and will never fabricate nonexistent files. When using tools to generate new image files, Visual ChatGPT is also known that the image may not be the same as the user's demand, and will use other visual question answering tools or description tools to observe the real image. Visual ChatGPT is able to use tools in a sequence, and is loyal to the tool observation outputs rather than faking the image content and image file name. !!!IT WILL REMEMBER!!! to provide the file name from the last tool observation, if a new image is generated.
 
-Visual ChatGPT is translating human input to a form that a tool can understand. For example, if a user wants to use a tool to generate a new image, Visual ChatGPT will translate the user's input to a vivid description, and then use the description to invoke the tool. 
+Visual ChatGPT is translating human input to a form that a tool can understand. For example, if a user wants to use a tool to generate a new image, Visual ChatGPT will translate the user's input to a vivid description, and then use the description to invoke the tool. Visual ChatGPT will pick random but appropriate tool for the task if the task can be accomplished by more than one tool.  
 
 Human may provide new figures to Visual ChatGPT with a description. The description helps Visual ChatGPT to understand this image, but Visual ChatGPT should use tools to finish following tasks, rather than directly imagine from the description.
 
@@ -52,26 +52,29 @@ Visual ChatGPT  has access to the following tools:"""
 
 VISUAL_CHATGPT_FORMAT_INSTRUCTIONS = """To use a tool, please use the following format:
 
+Format 1:
 ```
 Thought: Do I need to use a tool? Yes
 Action: the action to take, should be one of [{tool_names}]
-Action Input: the input to the action translated to English (if applicable)
-Observation: the result of the action (Human will read this)
+Action Input: the input to the action
+Observation: the result of the action
 ```
+Remember. Tools work only in English, so please talk in English to them.
 
 When you have a response to say to the Human, or if you do not need to use a tool, you MUST use the format:
 
+Format 2:
 ```
 Thought: Do I need to use a tool? No
-{ai_prefix}: [your response here] (Human will read this)
+{ai_prefix}: [your response here] (Human will read this, Remember to include image file name if it's in previous observation.)
 ```
-Please try to match human language as much as possible.
+Please try to match human language as much as possible. 
 """
 
-VISUAL_CHATGPT_SUFFIX = """You are very strict to the filename correctness and will never fake a file name if it does not exist.
-You will remember to provide the image file name loyally if it's provided in the last tool observation.
-You will remember to communicate with the tools in English only.
-You will remember to communicate with Human in their language of choice.
+VISUAL_CHATGPT_SUFFIX = """*You are very strict to the filename correctness and will never fake a file name if it does not exist.*
+*You will remember to PROVIDE the image file name loyally if it's provided in the last tool observation.*
+*You will remember to communicate with the tools in English only.*
+*You will remember to respond with either Format 1 or Format 2. if you're not sure use Format 2.*
 
 Begin!
 
@@ -80,7 +83,7 @@ Previous conversation history:
 
 New input: {input}
 Since Visual ChatGPT is a text language model, Visual ChatGPT must use tools to observe images rather than imagination.
-The thoughts and observations are only visible for Visual ChatGPT, Visual ChatGPT should remember to repeat important information in the final response for Human. 
+The thoughts and observations are only visible for Visual ChatGPT, Visual ChatGPT should remember to repeat important information in the final response for Human. Especially the generated file name.
 Thought: Do I need to use a tool? {agent_scratchpad}"""
 
 def cut_dialogue_history(history_memory, keep_last_n_words=500):
@@ -258,7 +261,7 @@ class canny2image:
 
     def inference(self, inputs):
         print("===>Starting canny2image Inference")
-        model = create_model('ControlNet/models/cldm_v15.yaml', device=device).to(device)
+        model = create_model('ControlNet/models/cldm_v15.yaml', device=self.device).to(self.device)
         model.load_state_dict(load_state_dict('ControlNet/models/control_sd15_canny.pth', location='cpu'))
         model = model.to(self.device)
         ddim_sampler = DDIMSampler(model)
@@ -809,7 +812,7 @@ class BLIPVQA:
 class ConversationBot:
     def __init__(self):
         print("Initializing VisualChatGPT")
-        self.llm = OpenAI(temperature=0)
+        self.llm = OpenAI(temperature=0.9, model_name="gpt-3.5-turbo")
         self.edit = ImageEditing(device="cuda:0")
         self.i2t = ImageCaptioning(device="cuda:0")
         self.t2i = T2I(device="cuda:0")
@@ -936,7 +939,9 @@ class ConversationBot:
         img.save(image_filename, "PNG")
         print(f"Resize image form {width}x{height} to {width_new}x{height_new}")
         description = self.i2t.inference(image_filename)
-        Human_prompt = "\nHuman: provide a figure named {}. The description is: {}. This information helps you to understand this image, but you should use tools to finish following tasks, " \
+        Human_prompt = "\nHuman: provide a figure named {}. " \
+                       "The description is: {}. " \
+                       "This information helps you to understand this image, but you should use tools to finish following tasks, " \
                        "rather than directly imagine from my description. If you understand, say \"Received\". \n".format(image_filename, description)
         AI_prompt = "Received.  "
         self.agent.memory.buffer = self.agent.memory.buffer + Human_prompt + 'AI: ' + AI_prompt
